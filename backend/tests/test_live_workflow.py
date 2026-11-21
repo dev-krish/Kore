@@ -7,25 +7,34 @@ from app.models.draft import ApprovalStatus
 async def test_full_user_journey_end_to_end():
     """
     Validates the complete 15-step user journey described in Section 2 and Section 16 (Definition of Done):
-    1. Student checks/creates career profile.
-    2. Student creates outreach campaign with natural-language objective.
-    3. Campaign agent executes discovery, website research, contact sourcing, relevance scoring, and draft generation.
-    4. Prospects (companies, contacts, research) are inspected.
-    5. Drafts are retrieved.
-    6. Tampering/unapproved sending is rejected by the Approval Gate.
-    7. Draft is edited and saved (approval reset).
-    8. Student explicitly approves draft (cryptographic SHA-256 hash generated).
-    9. Gmail delivery sends approved draft and logs delivery with provider message ID.
-    10. Duplicate send protection prevents re-sending.
+    1. Student authenticates (demo session in development).
+    2. Student checks/creates career profile.
+    3. Student creates outreach campaign with natural-language objective.
+    4. Campaign agent executes discovery, website research, contact sourcing, relevance scoring, and draft generation.
+    5. Prospects (companies, contacts, research) are inspected.
+    6. Drafts are retrieved.
+    7. Tampering/unapproved sending is rejected by the Approval Gate.
+    8. Draft is edited and saved (approval reset).
+    9. Student explicitly approves draft (cryptographic SHA-256 hash generated).
+    10. Delivery sends approved draft and logs delivery with provider message ID and transparent mode.
+    11. Duplicate send protection prevents re-sending.
     """
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        # Step 1: Profile
-        prof_res = await client.get("/api/profiles/me")
+        # Step 1: Authentication
+        auth_res = await client.get("/api/auth/demo-session")
+        assert auth_res.status_code == 200
+        auth_data = auth_res.json()
+        token = auth_data["accessToken"]
+        user_id = auth_data["user"]["id"]
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # Step 2: Profile
+        prof_res = await client.get("/api/profiles/me", headers=headers)
         assert prof_res.status_code == 200
         profile = prof_res.json()
         assert profile["fullName"] is not None
 
-        # Step 2: Campaign Creation
+        # Step 3: Campaign Creation
         camp_payload = {
             "name": "India AI Startups - Summer 2025 Internship",
             "objective": "Find 2 early-stage AI startups in India for a computer science student interested in AI engineering and full-stack development.",
@@ -35,25 +44,25 @@ async def test_full_user_journey_end_to_end():
             "targetProspectCount": 2,
             "preferredTechnologies": ["Python", "FastAPI", "React", "LLMs"]
         }
-        camp_res = await client.post("/api/campaigns", json=camp_payload)
+        camp_res = await client.post("/api/campaigns", json=camp_payload, headers=headers)
         assert camp_res.status_code == 200
         campaign = camp_res.json()
         campaign_id = campaign["_id"]
         assert campaign_id is not None
 
-        # Step 3: Directly run agent workflow for this campaign
+        # Step 4: Directly run agent workflow for this campaign
         from app.engine.agent import kore_agent_service
         agent_result = await kore_agent_service.run_campaign_agent(
             campaign_id=campaign_id,
-            user_id="665000000000000000000001"
+            user_id=user_id
         )
         assert agent_result["status"] == "completed"
         assert agent_result["companiesCount"] > 0
         assert agent_result["contactsCount"] > 0
         assert agent_result["draftsCount"] > 0
 
-        # Step 4: Verify prospects endpoint
-        prospects_res = await client.get(f"/api/campaigns/{campaign_id}/prospects")
+        # Step 5: Verify prospects endpoint
+        prospects_res = await client.get(f"/api/campaigns/{campaign_id}/prospects", headers=headers)
         assert prospects_res.status_code == 200
         prospects_data = prospects_res.json()
         assert len(prospects_data["companies"]) > 0
@@ -68,9 +77,10 @@ async def test_full_user_journey_end_to_end():
         assert "name" in first_contact
         assert "sourceUrl" in first_contact
         assert first_contact["confidence"] > 0.5
+        assert "provenance" in first_contact
 
-        # Step 5: Verify Drafts generated in approval queue
-        drafts_res = await client.get(f"/api/drafts?campaignId={campaign_id}")
+        # Step 6: Verify Drafts generated in approval queue
+        drafts_res = await client.get(f"/api/drafts?campaignId={campaign_id}", headers=headers)
         assert drafts_res.status_code == 200
         drafts = drafts_res.json()
         assert len(drafts) > 0
@@ -78,35 +88,36 @@ async def test_full_user_journey_end_to_end():
         draft_id = draft["_id"]
         assert draft["approvalStatus"] == ApprovalStatus.GENERATED.value
 
-        # Step 6: Security Gate Check - Attempting to send unapproved draft MUST FAIL (HTTP 403)
-        send_unapproved = await client.post(f"/api/drafts/{draft_id}/send")
+        # Step 7: Security Gate Check - Attempting to send unapproved draft MUST FAIL (HTTP 403)
+        send_unapproved = await client.post(f"/api/drafts/{draft_id}/send", headers=headers)
         assert send_unapproved.status_code == 403
         assert "Approval Gate" in send_unapproved.json()["detail"]
 
-        # Step 7: Edit draft
+        # Step 8: Edit draft
         edit_res = await client.put(f"/api/drafts/{draft_id}", json={
             "subject": "Tailored Inquiry: AI Engineering Internship at " + draft["companyName"],
             "body": "Dear " + draft["recipientName"] + ",\n\nI would love to contribute to your engineering team as an intern."
-        })
+        }, headers=headers)
         assert edit_res.status_code == 200
         edited_draft = edit_res.json()
         assert edited_draft["approvalStatus"] == ApprovalStatus.PENDING_REVIEW.value
         assert edited_draft["approvedContentHash"] is None
 
-        # Step 8: Explicit Human Approval
-        approve_res = await client.post(f"/api/drafts/{draft_id}/approve")
+        # Step 9: Explicit Human Approval
+        approve_res = await client.post(f"/api/drafts/{draft_id}/approve", headers=headers)
         assert approve_res.status_code == 200
         approve_data = approve_res.json()
         assert approve_data["status"] == "approved"
         assert approve_data["approvedContentHash"] is not None
 
-        # Step 9: Secure Dispatch through Gmail Service
-        send_res = await client.post(f"/api/drafts/{draft_id}/send")
+        # Step 10: Dispatch through Email/Gmail Service
+        send_res = await client.post(f"/api/drafts/{draft_id}/send", headers=headers)
         assert send_res.status_code == 200
         send_data = send_res.json()
         assert send_data["status"] == "sent"
         assert send_data["deliveryResult"]["providerMessageId"] is not None
+        assert "mode" in send_data["deliveryResult"]
 
-        # Step 10: Duplicate Send Prevention - Trying to send again MUST FAIL
-        duplicate_send = await client.post(f"/api/drafts/{draft_id}/send")
-        assert duplicate_send.status_code == 403
+        # Step 11: Duplicate Send Prevention - Trying to send again MUST FAIL
+        duplicate_send = await client.post(f"/api/drafts/{draft_id}/send", headers=headers)
+        assert duplicate_send.status_code in (403, 409)

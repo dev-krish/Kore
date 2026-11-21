@@ -3,9 +3,10 @@ from app.services.discovery.providers import BaseSearchProvider, DiscoveredCompa
 
 class DemoSearchProvider(BaseSearchProvider):
     """
-    Deterministic, transparent demo search provider containing curated public information
+    Transparent demo search provider containing curated public information
     about top AI/ML and software engineering startups in India and globally.
     Used when live search API keys are not provided.
+    All records are explicitly labeled with `is_demo_record=True` and `verification_status='demo_sample'`.
     """
 
     CURATED_COMPANIES = [
@@ -24,8 +25,8 @@ class DemoSearchProvider(BaseSearchProvider):
                     "professional_email": "pratyush@sarvam.ai",
                     "profile_url": "https://linkedin.com/in/pratyush-kumar-sarvam",
                     "source_url": "https://sarvam.ai/team",
-                    "confidence": 0.95,
-                    "verification_status": "publicly_disclosed"
+                    "confidence": 0.90,
+                    "verification_status": "demo_sample"
                 },
                 {
                     "name": "Vivek Raghavan",
@@ -33,8 +34,8 @@ class DemoSearchProvider(BaseSearchProvider):
                     "professional_email": "vivek@sarvam.ai",
                     "profile_url": "https://linkedin.com/in/vivek-raghavan-sarvam",
                     "source_url": "https://sarvam.ai/team",
-                    "confidence": 0.95,
-                    "verification_status": "publicly_disclosed"
+                    "confidence": 0.90,
+                    "verification_status": "demo_sample"
                 }
             ]
         },
@@ -53,8 +54,8 @@ class DemoSearchProvider(BaseSearchProvider):
                     "professional_email": "pranay@signoz.io",
                     "profile_url": "https://linkedin.com/in/pranayprateek",
                     "source_url": "https://github.com/signoz/signoz",
-                    "confidence": 0.92,
-                    "verification_status": "domain_matched"
+                    "confidence": 0.88,
+                    "verification_status": "demo_sample"
                 },
                 {
                     "name": "Ankit Nayan",
@@ -62,8 +63,8 @@ class DemoSearchProvider(BaseSearchProvider):
                     "professional_email": "ankit@signoz.io",
                     "profile_url": "https://linkedin.com/in/ankitnayan",
                     "source_url": "https://github.com/signoz/signoz",
-                    "confidence": 0.92,
-                    "verification_status": "domain_matched"
+                    "confidence": 0.88,
+                    "verification_status": "demo_sample"
                 }
             ]
         },
@@ -82,8 +83,8 @@ class DemoSearchProvider(BaseSearchProvider):
                     "professional_email": "tanmai@hasura.io",
                     "profile_url": "https://linkedin.com/in/tanmaig",
                     "source_url": "https://hasura.io/team",
-                    "confidence": 0.90,
-                    "verification_status": "publicly_disclosed"
+                    "confidence": 0.88,
+                    "verification_status": "demo_sample"
                 },
                 {
                     "name": "Rajoshi Ghosh",
@@ -91,8 +92,8 @@ class DemoSearchProvider(BaseSearchProvider):
                     "professional_email": "rajoshi@hasura.io",
                     "profile_url": "https://linkedin.com/in/rajoshighosh",
                     "source_url": "https://hasura.io/team",
-                    "confidence": 0.90,
-                    "verification_status": "publicly_disclosed"
+                    "confidence": 0.88,
+                    "verification_status": "demo_sample"
                 }
             ]
         },
@@ -111,8 +112,8 @@ class DemoSearchProvider(BaseSearchProvider):
                     "professional_email": "bhavish@olakrutrim.com",
                     "profile_url": "https://linkedin.com/in/bhavishaggarwal",
                     "source_url": "https://olakrutrim.com/news",
-                    "confidence": 0.88,
-                    "verification_status": "domain_matched"
+                    "confidence": 0.85,
+                    "verification_status": "demo_sample"
                 }
             ]
         },
@@ -131,8 +132,8 @@ class DemoSearchProvider(BaseSearchProvider):
                     "professional_email": "abhinav@postman.com",
                     "profile_url": "https://linkedin.com/in/abhinavasthana",
                     "source_url": "https://postman.com/company/about-us",
-                    "confidence": 0.94,
-                    "verification_status": "publicly_disclosed"
+                    "confidence": 0.90,
+                    "verification_status": "demo_sample"
                 },
                 {
                     "name": "Ankit Sobti",
@@ -140,8 +141,8 @@ class DemoSearchProvider(BaseSearchProvider):
                     "professional_email": "ankit@postman.com",
                     "profile_url": "https://linkedin.com/in/ankitsobti",
                     "source_url": "https://postman.com/company/about-us",
-                    "confidence": 0.94,
-                    "verification_status": "publicly_disclosed"
+                    "confidence": 0.90,
+                    "verification_status": "demo_sample"
                 }
             ]
         }
@@ -156,7 +157,6 @@ class DemoSearchProvider(BaseSearchProvider):
     ) -> List[DiscoveredCompany]:
         results = []
         for comp in self.CURATED_COMPANIES:
-            # Filter matches if criteria provided
             results.append(
                 DiscoveredCompany(
                     name=comp["name"],
@@ -165,7 +165,9 @@ class DemoSearchProvider(BaseSearchProvider):
                     industry=comp["industry"],
                     location=comp["location"],
                     technologies=comp["technologies"],
-                    source_url=comp["source_url"]
+                    source_url=comp["source_url"],
+                    is_demo_record=True,
+                    provenance="curated_demo"
                 )
             )
             if len(results) >= limit:
@@ -191,7 +193,9 @@ class DemoSearchProvider(BaseSearchProvider):
                             profile_url=contact["profile_url"],
                             source_url=contact["source_url"],
                             confidence=contact["confidence"],
-                            verification_status=contact["verification_status"]
+                            verification_status=contact["verification_status"],
+                            is_demo_record=True,
+                            provenance="curated_demo"
                         )
                     )
         return matched_contacts

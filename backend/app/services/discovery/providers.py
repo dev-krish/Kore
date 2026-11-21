@@ -10,6 +10,8 @@ class DiscoveredCompany(BaseModel):
     location: str
     technologies: List[str] = []
     source_url: str
+    is_demo_record: bool = False
+    provenance: str = "live_search"
 
 class DiscoveredContact(BaseModel):
     name: str
@@ -19,7 +21,9 @@ class DiscoveredContact(BaseModel):
     profile_url: Optional[str] = None
     source_url: str
     confidence: float = 0.8
-    verification_status: str = "publicly_disclosed"
+    verification_status: str = "unverified"
+    is_demo_record: bool = False
+    provenance: str = "live_search"
 
 class BaseSearchProvider(ABC):
     @abstractmethod

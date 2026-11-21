@@ -123,6 +123,8 @@ class KoreAgentService:
                     "location": comp.get("location"),
                     "technologies": comp.get("technologies", []),
                     "sources": [{"url": comp.get("source_url", comp.get("website")), "discoveredAt": datetime.now(timezone.utc)}],
+                    "isDemoRecord": comp.get("is_demo_record", False),
+                    "provenance": comp.get("provenance", "live_search"),
                     "createdAt": datetime.now(timezone.utc)
                 }
                 c_res = await db.companies.insert_one(comp_doc)
@@ -143,7 +145,9 @@ class KoreAgentService:
                     "profileUrl": contact.get("profile_url"),
                     "sourceUrl": contact.get("source_url"),
                     "confidence": contact.get("confidence", 0.8),
-                    "verificationStatus": contact.get("verification_status", "publicly_disclosed"),
+                    "verificationStatus": contact.get("verification_status", "unverified"),
+                    "isDemoRecord": contact.get("is_demo_record", False),
+                    "provenance": contact.get("provenance", "live_search"),
                     "relevanceScore": contact.get("relevanceScore", 0.85),
                     "relevanceReasons": contact.get("relevanceReasons", ""),
                     "suggestedAngle": contact.get("suggestedAngle", ""),

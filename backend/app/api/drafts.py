@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 import hashlib
 from typing import List, Optional
 from bson import ObjectId
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from app.core.database import get_database
 from app.api.deps import get_current_user_id
 from app.models.draft import ApprovalStatus, EmailDraftModel, EmailDraftUpdate
@@ -35,9 +35,14 @@ async def list_drafts(
 @router.get("/{draft_id}")
 async def get_draft(draft_id: str, user_id: str = Depends(get_current_user_id)):
     db = get_database()
-    doc = await db.emailDrafts.find_one({"_id": ObjectId(draft_id), "userId": user_id})
+    try:
+        obj_id = ObjectId(draft_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid draft ID format.")
+
+    doc = await db.emailDrafts.find_one({"_id": obj_id, "userId": user_id})
     if not doc:
-        raise HTTPException(status_code=404, detail="Email draft not found")
+        raise HTTPException(status_code=404, detail="Email draft not found.")
     doc["_id"] = str(doc["_id"])
     return doc
 
@@ -50,14 +55,24 @@ async def update_draft(
     """
     Edits a draft's subject or body.
     CRITICAL: Any edit invalidates previous approvals to prevent unauthorized modification.
+    Editing is strictly prohibited once sending has begun or completed.
     """
     db = get_database()
-    existing = await db.emailDrafts.find_one({"_id": ObjectId(draft_id), "userId": user_id})
-    if not existing:
-        raise HTTPException(status_code=404, detail="Email draft not found")
+    try:
+        obj_id = ObjectId(draft_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid draft ID format.")
 
-    if existing.get("approvalStatus") == ApprovalStatus.SENT.value:
-        raise HTTPException(status_code=400, detail="Cannot edit an email that has already been sent.")
+    existing = await db.emailDrafts.find_one({"_id": obj_id, "userId": user_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Email draft not found.")
+
+    current_status = existing.get("approvalStatus")
+    if current_status in (ApprovalStatus.SENT.value, ApprovalStatus.SENDING.value):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot edit draft in '{current_status}' state."
+        )
 
     update_fields = {}
     if update_data.subject is not None:
@@ -72,7 +87,7 @@ async def update_draft(
     update_fields["updatedAt"] = datetime.now(timezone.utc)
 
     updated = await db.emailDrafts.find_one_and_update(
-        {"_id": ObjectId(draft_id), "userId": user_id},
+        {"_id": obj_id, "userId": user_id},
         {"$set": update_fields},
         return_document=True
     )
@@ -83,15 +98,24 @@ async def update_draft(
 async def approve_draft(draft_id: str, user_id: str = Depends(get_current_user_id)):
     """
     Explicit user approval of an exact email draft.
-    Generates and stores the SHA-256 integrity hash of recipient + subject + body.
+    Generates and stores the cryptographic SHA-256 integrity hash of recipient + subject + body.
     """
     db = get_database()
-    draft = await db.emailDrafts.find_one({"_id": ObjectId(draft_id), "userId": user_id})
-    if not draft:
-        raise HTTPException(status_code=404, detail="Email draft not found")
+    try:
+        obj_id = ObjectId(draft_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid draft ID format.")
 
-    if draft.get("approvalStatus") == ApprovalStatus.SENT.value:
-        raise HTTPException(status_code=400, detail="Cannot re-approve an email that has already been sent.")
+    draft = await db.emailDrafts.find_one({"_id": obj_id, "userId": user_id})
+    if not draft:
+        raise HTTPException(status_code=404, detail="Email draft not found.")
+
+    current_status = draft.get("approvalStatus")
+    if current_status in (ApprovalStatus.SENT.value, ApprovalStatus.SENDING.value):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot re-approve an email that is already '{current_status}'."
+        )
 
     content_hash = approval_gate.compute_content_hash(
         recipient=draft["recipientEmail"],
@@ -101,7 +125,7 @@ async def approve_draft(draft_id: str, user_id: str = Depends(get_current_user_i
 
     now = datetime.now(timezone.utc)
     updated = await db.emailDrafts.find_one_and_update(
-        {"_id": ObjectId(draft_id), "userId": user_id},
+        {"_id": obj_id, "userId": user_id},
         {
             "$set": {
                 "approvalStatus": ApprovalStatus.APPROVED.value,
@@ -112,7 +136,6 @@ async def approve_draft(draft_id: str, user_id: str = Depends(get_current_user_i
         },
         return_document=True
     )
-    updated["_id"] = str(updated["_id"])
     return {
         "status": "approved",
         "draftId": draft_id,
@@ -124,24 +147,32 @@ async def approve_draft(draft_id: str, user_id: str = Depends(get_current_user_i
 async def reject_draft(draft_id: str, user_id: str = Depends(get_current_user_id)):
     """Rejects an email draft, archiving it from the active send queue."""
     db = get_database()
-    draft = await db.emailDrafts.find_one({"_id": ObjectId(draft_id), "userId": user_id})
-    if not draft:
-        raise HTTPException(status_code=404, detail="Email draft not found")
+    try:
+        obj_id = ObjectId(draft_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid draft ID format.")
 
-    if draft.get("approvalStatus") == ApprovalStatus.SENT.value:
-        raise HTTPException(status_code=400, detail="Cannot reject an email that has already been sent.")
+    draft = await db.emailDrafts.find_one({"_id": obj_id, "userId": user_id})
+    if not draft:
+        raise HTTPException(status_code=404, detail="Email draft not found.")
+
+    current_status = draft.get("approvalStatus")
+    if current_status in (ApprovalStatus.SENT.value, ApprovalStatus.SENDING.value):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot reject an email that is already '{current_status}'."
+        )
 
     now = datetime.now(timezone.utc)
-    updated = await db.emailDrafts.find_one_and_update(
-        {"_id": ObjectId(draft_id), "userId": user_id},
+    await db.emailDrafts.update_one(
+        {"_id": obj_id, "userId": user_id},
         {
             "$set": {
                 "approvalStatus": ApprovalStatus.REJECTED.value,
                 "approvedContentHash": None,
                 "updatedAt": now
             }
-        },
-        return_document=True
+        }
     )
     return {"status": "rejected", "draftId": draft_id}
 
@@ -149,38 +180,89 @@ async def reject_draft(draft_id: str, user_id: str = Depends(get_current_user_id
 async def send_approved_draft(draft_id: str, user_id: str = Depends(get_current_user_id)):
     """
     Sends an email draft ONLY after passing the strict Human Approval Gate.
-    Verifies content integrity hash, prevents duplicate sends, and logs delivery.
+    Guarantees:
+    1. Atomic conditional state transition (Compare-And-Swap) preventing concurrent duplicate sends.
+    2. Cryptographic content hash matching recipient + subject + body.
+    3. User-specific Gmail OAuth token validation.
+    4. Safe handling of uncertain or failed delivery outcomes.
     """
     db = get_database()
-    draft_doc = await db.emailDrafts.find_one({"_id": ObjectId(draft_id), "userId": user_id})
+    try:
+        obj_id = ObjectId(draft_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid draft ID format.")
+
+    # Step 1: Read draft to verify approval preconditions
+    draft_doc = await db.emailDrafts.find_one({"_id": obj_id, "userId": user_id})
     if not draft_doc:
-        raise HTTPException(status_code=404, detail="Email draft not found")
+        raise HTTPException(status_code=404, detail="Email draft not found.")
 
     draft_doc["_id"] = str(draft_doc["_id"])
     draft_model = EmailDraftModel(**draft_doc)
 
-    # 1. Enforce Approval Gate
     is_valid, reason = approval_gate.verify_ready_for_sending(draft_model)
     if not is_valid:
-        raise HTTPException(status_code=403, detail=f"Human Approval Gate check failed: {reason}")
-
-    # Mark sending in progress
-    await db.emailDrafts.update_one(
-        {"_id": ObjectId(draft_id)},
-        {"$set": {"approvalStatus": ApprovalStatus.SENDING.value}}
-    )
-
-    # 2. Dispatch via Gmail Service
-    delivery_result = await gmail_service.send_email(
-        recipient=draft_model.recipientEmail,
-        subject=draft_model.subject,
-        body=draft_model.body
-    )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Human Approval Gate check failed: {reason}"
+        )
 
     now = datetime.now(timezone.utc)
 
+    # Step 2: ATOMIC CONDITIONAL STATE TRANSITION (Prevents concurrent race conditions)
+    # Only transitions to SENDING if current status is exactly APPROVED and hash matches!
+    locked_draft = await db.emailDrafts.find_one_and_update(
+        {
+            "_id": obj_id,
+            "userId": user_id,
+            "approvalStatus": ApprovalStatus.APPROVED.value,
+            "approvedContentHash": draft_model.approvedContentHash
+        },
+        {
+            "$set": {
+                "approvalStatus": ApprovalStatus.SENDING.value,
+                "sendingStartedAt": now,
+                "updatedAt": now
+            }
+        },
+        return_document=True
+    )
+
+    if not locked_draft:
+        # A concurrent request or status transition intervened!
+        current = await db.emailDrafts.find_one({"_id": obj_id, "userId": user_id})
+        status_val = current.get("approvalStatus") if current else "unknown"
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Concurrent send or invalid state detected. Draft status is currently '{status_val}'. Duplicate send blocked."
+        )
+
+    # Step 3: Retrieve authenticated user's stored OAuth tokens
+    user_cred = await db.integrationCredentials.find_one({"userId": user_id, "provider": "gmail"})
+    user_tokens = user_cred.get("tokens") if user_cred else None
+
+    # Step 4: Dispatch via Gmail Service
+    try:
+        delivery_result = await gmail_service.send_email(
+            recipient=draft_model.recipientEmail,
+            subject=draft_model.subject,
+            body=draft_model.body,
+            user_tokens=user_tokens
+        )
+    except Exception as dispatch_err:
+        delivery_result = {
+            "success": False,
+            "mode": "unknown",
+            "error": f"Unexpected dispatch exception: {str(dispatch_err)}"
+        }
+
+    now_completed = datetime.now(timezone.utc)
+
     if delivery_result.get("success"):
-        # 3. Record Delivery
+        mode = delivery_result.get("mode", "live_gmail")
+        delivery_status = DeliveryStatus.SUCCESS.value if mode == "live_gmail" else DeliveryStatus.DEMO_DELIVERED.value
+
+        # Step 5: Record Delivery Audit Log
         delivery_doc = {
             "draftId": draft_id,
             "campaignId": draft_model.campaignId,
@@ -189,21 +271,27 @@ async def send_approved_draft(draft_id: str, user_id: str = Depends(get_current_
             "subject": draft_model.subject,
             "contentHash": draft_model.approvedContentHash,
             "providerMessageId": delivery_result.get("providerMessageId"),
-            "status": DeliveryStatus.SUCCESS.value if delivery_result.get("mode") == "live_gmail" else DeliveryStatus.DEMO_DELIVERED.value,
-            "sentAt": now
+            "status": delivery_status,
+            "mode": mode,
+            "sentAt": now_completed
         }
         await db.emailDeliveries.insert_one(delivery_doc)
 
-        # 4. Mark draft as SENT
+        # Step 6: Mark draft as SENT
         await db.emailDrafts.update_one(
-            {"_id": ObjectId(draft_id)},
-            {"$set": {"approvalStatus": ApprovalStatus.SENT.value, "updatedAt": now}}
+            {"_id": obj_id},
+            {
+                "$set": {
+                    "approvalStatus": ApprovalStatus.SENT.value,
+                    "updatedAt": now_completed
+                }
+            }
         )
 
-        # 5. Increment Campaign Sent Count
+        # Step 7: Increment Campaign Sent Count
         await db.campaigns.update_one(
             {"_id": ObjectId(draft_model.campaignId)},
-            {"$inc": {"emailsSentCount": 1}, "$set": {"updatedAt": now}}
+            {"$inc": {"emailsSentCount": 1}, "$set": {"updatedAt": now_completed}}
         )
 
         return {
@@ -212,12 +300,31 @@ async def send_approved_draft(draft_id: str, user_id: str = Depends(get_current_
             "deliveryResult": delivery_result
         }
     else:
-        # Mark draft as FAILED
+        # Step 8: Safe Failure Handling: Transition status to FAILED, record audit log
+        err_msg = delivery_result.get("error", "Unknown provider dispatch error.")
         await db.emailDrafts.update_one(
-            {"_id": ObjectId(draft_id)},
-            {"$set": {"approvalStatus": ApprovalStatus.FAILED.value, "updatedAt": now}}
+            {"_id": obj_id},
+            {
+                "$set": {
+                    "approvalStatus": ApprovalStatus.FAILED.value,
+                    "deliveryError": err_msg,
+                    "updatedAt": now_completed
+                }
+            }
         )
+        await db.emailDeliveries.insert_one({
+            "draftId": draft_id,
+            "campaignId": draft_model.campaignId,
+            "userId": user_id,
+            "recipient": draft_model.recipientEmail,
+            "subject": draft_model.subject,
+            "contentHash": draft_model.approvedContentHash,
+            "status": DeliveryStatus.FAILED.value,
+            "error": err_msg,
+            "sentAt": now_completed
+        })
+
         raise HTTPException(
-            status_code=500,
-            detail=f"Email dispatch failed: {delivery_result.get('error', 'Unknown provider error')}"
+            status_code=status.HTTP_400_BAD_REQUEST if "not connected" in err_msg.lower() else status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Email dispatch failed: {err_msg}"
         )
