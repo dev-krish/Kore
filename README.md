@@ -224,4 +224,3 @@ LLM_PROVIDER=mock pytest tests/ -v
 - [x] **Human Approval Gate:** SHA-256 cryptographic authorization.
 - [x] **Gmail Dispatch:** Gmail OAuth 2.0 integration with transparent demo delivery simulation fallback.
 - [x] **Execution Observability:** Live SSE event stream, step history, and tool invocation inspector.
-# Kore
