@@ -1,18 +1,20 @@
 import base64
 from email.mime.text import MIMEText
 import logging
-import uuid
+import socket
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional, Tuple
+from typing import Any, Dict, Optional
+import uuid
+import httpx
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 class GmailService:
     """
-    Gmail OAuth 2.0 and API integration service.
-    Implements authorization code exchange, token refresh, and sending emails
-    with strict user-scoped credential checks.
+    Service wrapper for Google OAuth 2.0 and Gmail API integration.
+    Supports secure CSRF-bound authorization URLs, code-for-token exchange,
+    token refresh, and robust delivery error handling.
     """
 
     def __init__(self):
@@ -24,39 +26,59 @@ class GmailService:
         return bool(self.client_id and self.client_secret)
 
     def get_auth_url(self, state: str) -> str:
-        if not self.is_configured():
-            return f"{settings.FRONTEND_URL}/integrations?demo_gmail=configured&state={state}"
-        
-        from google_auth_oauthlib.flow import Flow
-        flow = Flow.from_client_config(
-            {
-                "web": {
-                    "client_id": self.client_id,
-                    "client_secret": self.client_secret,
-                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                    "token_uri": "https://oauth2.googleapis.com/token",
-                    "redirect_uris": [self.redirect_uri]
-                }
-            },
-            scopes=["https://www.googleapis.com/auth/gmail.send"]
+        """
+        Generates Google OAuth 2.0 authorization URL bound to a cryptographic CSRF state.
+        """
+        if self.is_configured():
+            try:
+                from google_auth_oauthlib.flow import Flow
+                flow = Flow.from_client_config(
+                    {
+                        "web": {
+                            "client_id": self.client_id,
+                            "client_secret": self.client_secret,
+                            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                            "token_uri": "https://oauth2.googleapis.com/token",
+                            "redirect_uris": [self.redirect_uri]
+                        }
+                    },
+                    scopes=["https://www.googleapis.com/auth/gmail.send"]
+                )
+                flow.redirect_uri = self.redirect_uri
+                auth_url, _ = flow.authorization_url(
+                    access_type="offline",
+                    include_granted_scopes="true",
+                    prompt="consent",
+                    state=state
+                )
+                return auth_url
+            except Exception as e:
+                logger.error(f"Error generating Google OAuth URL via google-auth-oauthlib: {e}")
+
+        # Fallback OAuth URL format
+        return (
+            f"https://accounts.google.com/o/oauth2/auth?"
+            f"client_id={self.client_id or 'mock_client_id'}&"
+            f"redirect_uri={self.redirect_uri}&"
+            f"response_type=code&"
+            f"scope=https://www.googleapis.com/auth/gmail.send&"
+            f"access_type=offline&"
+            f"prompt=consent&"
+            f"state={state}"
         )
-        flow.redirect_uri = self.redirect_uri
-        auth_url, _ = flow.authorization_url(state=state, prompt="consent", access_type="offline")
-        return auth_url
 
     def exchange_code(self, code: str) -> Dict[str, Any]:
         """
-        Exchanges an OAuth authorization code for Google user credentials.
+        Exchanges an authorization code for OAuth tokens.
+        Avoids storing duplicate server-level client secrets in user credential records.
         """
         if not self.is_configured():
-            # In demo mode, return simulated credentials format
             return {
-                "access_token": f"demo_access_token_{uuid.uuid4().hex[:16]}",
-                "refresh_token": f"demo_refresh_token_{uuid.uuid4().hex[:16]}",
+                "access_token": f"mock_token_{uuid.uuid4().hex}",
+                "refresh_token": f"mock_refresh_{uuid.uuid4().hex}",
                 "token_uri": "https://oauth2.googleapis.com/token",
-                "client_id": "demo_client_id",
                 "scopes": ["https://www.googleapis.com/auth/gmail.send"],
-                "expires_at": None,
+                "expiry": None,
                 "is_demo_token": True
             }
 
@@ -77,12 +99,11 @@ class GmailService:
         flow.fetch_token(code=code)
         credentials = flow.credentials
 
+        # Return user tokens ONLY — do not duplicate client_secret in user records!
         return {
             "access_token": credentials.token,
             "refresh_token": credentials.refresh_token,
             "token_uri": credentials.token_uri,
-            "client_id": credentials.client_id,
-            "client_secret": credentials.client_secret,
             "scopes": credentials.scopes,
             "expiry": credentials.expiry.isoformat() if credentials.expiry else None,
             "is_demo_token": False
@@ -93,9 +114,20 @@ class GmailService:
         recipient: str,
         subject: str,
         body: str,
-        user_tokens: Optional[Dict[str, Any]] = None
+        user_tokens: Optional[Dict[str, Any]] = None,
+        is_demo_record: bool = False
     ) -> Dict[str, Any]:
         logger.info(f"Gmail send request initiated for recipient: {recipient}")
+
+        # Server-side guard: Prevent live Gmail delivery to demo contacts
+        if is_demo_record or recipient.endswith("@example.com"):
+            if self.is_configured() and settings.GMAIL_MODE == "live":
+                logger.warning(f"Blocked live Gmail delivery to demo contact {recipient}.")
+                return {
+                    "success": False,
+                    "mode": "live_gmail",
+                    "error": "Live Gmail delivery to demo contacts is strictly blocked. Switch GMAIL_MODE to 'demo' or use live discovered contacts."
+                }
 
         # Check for live Google credentials and valid user token
         if self.is_configured() and user_tokens and user_tokens.get("access_token") and not user_tokens.get("is_demo_token"):
@@ -114,10 +146,11 @@ class GmailService:
                 )
 
                 # Token refresh handling if expired
+                refreshed = False
                 if creds.expired and creds.refresh_token:
                     logger.info("Access token expired. Refreshing token via Google OAuth...")
                     creds.refresh(Request())
-                    # Note: caller should update the stored token
+                    refreshed = True
 
                 service = build("gmail", "v1", credentials=creds)
 
@@ -137,7 +170,16 @@ class GmailService:
                     "mode": "live_gmail",
                     "providerMessageId": sent_msg.get("id"),
                     "sentAt": datetime.now(timezone.utc).isoformat(),
-                    "refreshedToken": creds.token if creds.expired else None
+                    "refreshedToken": creds.token if refreshed else None,
+                    "refreshedExpiry": creds.expiry.isoformat() if (refreshed and creds.expiry) else None
+                }
+            except (TimeoutError, socket.timeout, httpx.TimeoutException, ConnectionResetError) as net_err:
+                logger.error(f"Network timeout / ambiguous disconnection during dispatch: {net_err}")
+                return {
+                    "success": False,
+                    "status": "uncertain",
+                    "mode": "live_gmail",
+                    "error": f"Ambiguous delivery outcome: {type(net_err).__name__}: {str(net_err)}. Network dropped or timed out mid-flight; delivery unconfirmed."
                 }
             except Exception as e:
                 logger.error(f"Live Gmail API delivery failed: {e}")

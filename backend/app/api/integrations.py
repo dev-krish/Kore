@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
 from app.core.config import settings
 from app.core.database import get_database
+from app.core.encryption import encrypt_token
 from app.api.deps import get_current_user_id
 from app.engine.llm.factory import get_llm_provider
 from app.services.email.gmail_service import gmail_service
@@ -119,7 +120,12 @@ async def gmail_callback(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to exchange OAuth code for tokens: {str(e)}")
 
-    # 3. Store credentials securely scoped to the user ID
+    # 3. Store credentials securely scoped to the user ID (encrypted at rest)
+    if "access_token" in token_data:
+        token_data["access_token"] = encrypt_token(token_data["access_token"])
+    if "refresh_token" in token_data:
+        token_data["refresh_token"] = encrypt_token(token_data["refresh_token"])
+
     now = datetime.now(timezone.utc)
     await db.integrationCredentials.update_one(
         {"userId": user_id, "provider": "gmail"},

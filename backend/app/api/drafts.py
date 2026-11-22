@@ -3,7 +3,9 @@ import hashlib
 from typing import List, Optional
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from app.core.config import settings
 from app.core.database import get_database
+from app.core.encryption import encrypt_token, decrypt_token
 from app.api.deps import get_current_user_id
 from app.models.draft import ApprovalStatus, EmailDraftModel, EmailDraftUpdate
 from app.models.delivery import DeliveryStatus, EmailDeliveryModel
@@ -207,6 +209,21 @@ async def send_approved_draft(draft_id: str, user_id: str = Depends(get_current_
             detail=f"Human Approval Gate check failed: {reason}"
         )
 
+    # Server-side guard 1: Validate recipient email is present and valid
+    if not draft_model.recipientEmail or draft_model.recipientEmail == "contact@example.com":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot send draft without a valid, verified recipient email address."
+        )
+
+    # Server-side guard 2: Strictly block live Gmail delivery to demo contacts
+    is_demo = bool(draft_doc.get("isDemoRecord") or draft_doc.get("provenance") == "curated_demo" or draft_model.recipientEmail.endswith("@example.com"))
+    if is_demo and settings.GMAIL_MODE == "live" and gmail_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Live Gmail delivery to demo contacts is strictly blocked. Switch GMAIL_MODE to 'demo' or use live discovered contacts."
+        )
+
     now = datetime.now(timezone.utc)
 
     # Step 2: ATOMIC CONDITIONAL STATE TRANSITION (Prevents concurrent race conditions)
@@ -237,9 +254,15 @@ async def send_approved_draft(draft_id: str, user_id: str = Depends(get_current_
             detail=f"Concurrent send or invalid state detected. Draft status is currently '{status_val}'. Duplicate send blocked."
         )
 
-    # Step 3: Retrieve authenticated user's stored OAuth tokens
+    # Step 3: Retrieve authenticated user's stored OAuth tokens (decrypted for dispatch)
     user_cred = await db.integrationCredentials.find_one({"userId": user_id, "provider": "gmail"})
     user_tokens = user_cred.get("tokens") if user_cred else None
+    if user_tokens:
+        user_tokens = dict(user_tokens)
+        if "access_token" in user_tokens:
+            user_tokens["access_token"] = decrypt_token(user_tokens["access_token"])
+        if "refresh_token" in user_tokens:
+            user_tokens["refresh_token"] = decrypt_token(user_tokens["refresh_token"])
 
     # Step 4: Dispatch via Gmail Service
     try:
@@ -247,7 +270,8 @@ async def send_approved_draft(draft_id: str, user_id: str = Depends(get_current_
             recipient=draft_model.recipientEmail,
             subject=draft_model.subject,
             body=draft_model.body,
-            user_tokens=user_tokens
+            user_tokens=user_tokens,
+            is_demo_record=is_demo
         )
     except Exception as dispatch_err:
         delivery_result = {
@@ -257,6 +281,49 @@ async def send_approved_draft(draft_id: str, user_id: str = Depends(get_current_
         }
 
     now_completed = datetime.now(timezone.utc)
+
+    # Persist refreshed OAuth token if Google OAuth renewed the session
+    if delivery_result.get("refreshedToken"):
+        await db.integrationCredentials.update_one(
+            {"userId": user_id, "provider": "gmail"},
+            {
+                "$set": {
+                    "tokens.access_token": encrypt_token(delivery_result["refreshedToken"]),
+                    "tokens.expiry": delivery_result.get("refreshedExpiry"),
+                    "updatedAt": now_completed
+                }
+            }
+        )
+
+    # Handle Uncertain Delivery State (Ambiguous network failure mid-dispatch)
+    if delivery_result.get("status") == "uncertain":
+        err_msg = delivery_result.get("error", "Unconfirmed delivery outcome due to network timeout.")
+        await db.emailDrafts.update_one(
+            {"_id": obj_id},
+            {
+                "$set": {
+                    "approvalStatus": ApprovalStatus.FAILED.value,
+                    "deliveryError": f"UNCERTAIN: {err_msg} Automated retry is blocked to prevent double-send.",
+                    "updatedAt": now_completed
+                }
+            }
+        )
+        await db.emailDeliveries.insert_one({
+            "draftId": draft_id,
+            "campaignId": draft_model.campaignId,
+            "userId": user_id,
+            "recipient": draft_model.recipientEmail,
+            "subject": draft_model.subject,
+            "contentHash": draft_model.approvedContentHash,
+            "status": DeliveryStatus.UNCERTAIN.value,
+            "mode": delivery_result.get("mode", "live_gmail"),
+            "error": err_msg,
+            "sentAt": now_completed
+        })
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=f"Email dispatch uncertain: {err_msg} Automated retry is blocked to prevent double-sending."
+        )
 
     if delivery_result.get("success"):
         mode = delivery_result.get("mode", "live_gmail")
