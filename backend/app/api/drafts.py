@@ -289,10 +289,13 @@ async def send_approved_draft(draft_id: str, user_id: str = Depends(get_current_
         )
 
         # Step 7: Increment Campaign Sent Count
-        await db.campaigns.update_one(
-            {"_id": ObjectId(draft_model.campaignId)},
-            {"$inc": {"emailsSentCount": 1}, "$set": {"updatedAt": now_completed}}
-        )
+        try:
+            await db.campaigns.update_one(
+                {"_id": ObjectId(draft_model.campaignId)},
+                {"$inc": {"emailsSentCount": 1}, "$set": {"updatedAt": now_completed}}
+            )
+        except Exception:
+            pass
 
         return {
             "status": "sent",

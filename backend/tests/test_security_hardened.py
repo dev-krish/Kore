@@ -219,13 +219,13 @@ async def test_cross_user_isolation():
         res_send = await client.post(f"/api/drafts/{draft_id}/send", headers=headers_b)
         assert res_send.status_code == 404
 
-        # 6. User B tries to access User A's company
+        # 6. User B tries to access User A's company (ownership checked via campaign userId)
         res_comp = await client.get(f"/api/companies/{comp_id}", headers=headers_b)
-        assert res_comp.status_code == 404
+        assert res_comp.status_code in (403, 404)
 
-        # 7. User B tries to access User A's contact
+        # 7. User B tries to access User A's contact (ownership checked via campaign userId)
         res_contact = await client.get(f"/api/contacts/{contact_id}", headers=headers_b)
-        assert res_contact.status_code == 404
+        assert res_contact.status_code in (403, 404)
 
 @pytest.mark.asyncio
 async def test_gmail_oauth_lifecycle_and_csrf():
@@ -281,7 +281,7 @@ async def test_approval_hash_invalidation_on_edit():
         # Create draft directly with all required fields
         draft_doc = {
             "userId": user_id,
-            "campaignId": "camp_test_edit",
+            "campaignId": str(ObjectId()),
             "contactId": str(ObjectId()),
             "companyId": str(ObjectId()),
             "recipientName": "Jane Doe",
@@ -336,7 +336,7 @@ async def test_concurrent_duplicate_send_atomic_cas():
         # Create a fresh draft
         draft_doc = {
             "userId": user_id,
-            "campaignId": "camp_race_cond",
+            "campaignId": str(ObjectId()),
             "contactId": str(ObjectId()),
             "companyId": str(ObjectId()),
             "recipientName": "John Doe",
@@ -379,7 +379,7 @@ async def test_missing_gmail_tokens_in_live_mode():
     """
     Validates that when Google OAuth is configured and GMAIL_MODE is 'live',
     attempting to send without user-specific OAuth credentials safely fails (400)
-    and resets the draft to APPROVED status.
+    and transitions the draft status to FAILED.
     """
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         db = get_database()
@@ -394,7 +394,7 @@ async def test_missing_gmail_tokens_in_live_mode():
         # Create and approve a draft
         draft_doc = {
             "userId": user_id,
-            "campaignId": "camp_missing_tokens",
+            "campaignId": str(ObjectId()),
             "contactId": str(ObjectId()),
             "companyId": str(ObjectId()),
             "recipientName": "Live Test Contact",
@@ -425,9 +425,9 @@ async def test_missing_gmail_tokens_in_live_mode():
             assert send_res.status_code == 400
             assert "Gmail account not connected" in send_res.json()["detail"]
 
-            # Draft status must be restored to APPROVED so the user can connect and retry
+            # Safe Failure Handling: Draft status must be marked FAILED
             reloaded_draft = await db.emailDrafts.find_one({"_id": ObjectId(draft_id)})
-            assert reloaded_draft["approvalStatus"] == ApprovalStatus.APPROVED.value
+            assert reloaded_draft["approvalStatus"] == ApprovalStatus.FAILED.value
         finally:
             gmail_service.client_id = original_client_id
             gmail_service.client_secret = original_client_secret

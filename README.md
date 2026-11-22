@@ -15,7 +15,7 @@ Traditional student outreach is cumbersome, prone to spam, and involves tedious 
 
 **KORE transforms a student's technical career profile and natural-language objective into a structured, researched, personalized, and strictly human-approved outreach campaign.**
 
-Unlike generic AI wrappers or uncontrolled spam bots, KORE executes a genuine tool-using agent with a controlled **Observe-Decide-Act-Verify** loop, complete source attribution, and a **zero-bypass cryptographic Human Approval Gate**.
+Unlike generic AI wrappers or uncontrolled spam bots, KORE executes a genuine tool-using agent with a controlled **Observe-Decide-Act-Verify** loop, complete source attribution, atomic delivery safety, and a **zero-bypass cryptographic Human Approval Gate**.
 
 ---
 
@@ -67,7 +67,8 @@ Unlike generic AI wrappers or uncontrolled spam bots, KORE executes a genuine to
                                           |
                                           v
                                      [send_email]
-                       (Gmail OAuth 2.0 / Verified Demo Mode)
+                       (Atomic Compare-and-Swap State Lock)
+                       (Gmail OAuth 2.0 / User Token Scoped)
                                           |
                                           v
                             CAMPAIGN DELIVERY AUDIT LOG
@@ -93,7 +94,7 @@ Unlike generic AI wrappers or uncontrolled spam bots, KORE executes a genuine to
 - **HTTP Engine:** HTTPX (async client with retry and timeout policies)
 - **Real-Time Streaming:** Server-Sent Events (SSE) for live agent execution timeline
 - **Browser Automation:** Playwright Chromium with robust DOM-based BeautifulSoup4 fallback
-- **Security:** Python-Jose (JWT), Passlib (Bcrypt), SHA-256 content hashing
+- **Security:** Native `bcrypt` password hashing, Python-Jose (JWT), SHA-256 content hashing
 
 ### AI & LLM Engine
 - **Local Inference:** Ollama running `qwen3:4b`
@@ -102,8 +103,8 @@ Unlike generic AI wrappers or uncontrolled spam bots, KORE executes a genuine to
 
 ### Database
 - **Engine:** MongoDB 7.0
-- **Collections:** `users`, `profiles`, `campaigns`, `companies`, `contacts`, `research`, `emailDrafts`, `emailDeliveries`, `agentExecutions`
-- **Isolation:** Automatic user ownership checks on all endpoints
+- **Collections:** `users`, `profiles`, `campaigns`, `companies`, `contacts`, `research`, `emailDrafts`, `emailDeliveries`, `agentExecutions`, `oauthStates`, `integrationCredentials`
+- **Isolation:** Strict user ownership verification across all endpoints
 
 ---
 
@@ -125,14 +126,16 @@ KORE implements 7 modular agent tools inside `backend/app/engine/tools/`:
 
 ## 5. Security & Human-in-the-Loop Approval Gate
 
-KORE enforces strict safeguards against automated spam:
+KORE enforces strict safeguards against automated spam and unauthorized operations:
 
 1. **Zero LLM Autonomy for Sending:** The LLM agent **cannot** call `send_email` autonomously. It can only generate drafts with status `generated`.
 2. **Cryptographic Content Hashing:** When the user clicks **Approve Draft**, the backend computes:
    $$\text{Hash} = \text{SHA256}(\text{recipient} \parallel \text{subject} \parallel \text{body})$$
    and saves `approvedContentHash`.
 3. **Anti-Tampering Invalidation:** If the user edits the draft subject or body after approval, the approval status is instantly invalidated (`pending_review`, hash cleared) and a fresh approval is required.
-4. **Duplicate-Send Guard:** Drafts marked `sent` are permanently locked to prevent accidental duplicate messages.
+4. **Atomic Conditional State Transition (Compare-And-Swap):** Sending utilizes MongoDB's `find_one_and_update` on status `APPROVED` and matching hash. Concurrent duplicate requests are immediately blocked (HTTP 409 Conflict), guaranteeing zero duplicate sends.
+5. **Cross-User Data Isolation:** Every campaign, company, contact, and draft is scoped to the authenticated user ID. Cross-user attempts receive HTTP 404 or 403.
+6. **Strict Authentication & Scoped OAuth:** Passwords are encrypted with native `bcrypt` (minimum 8 characters). Bearer JWTs verify user existence in the database. Google OAuth utilizes cryptographic CSRF state parameters consumed atomically upon callback.
 
 ---
 
@@ -181,7 +184,7 @@ docker-compose up --build
 
 ## 7. Verification & Automated Test Suite
 
-KORE includes an automated test suite verifying both unit tool operations and the end-to-end user workflow:
+KORE includes an automated test suite verifying unit tool operations, security hardening, user isolation, and end-to-end workflows:
 
 ```bash
 cd backend
@@ -189,24 +192,32 @@ source venv/bin/activate
 LLM_PROVIDER=mock pytest tests/ -v
 ```
 
-### Test Suite Results:
-- `test_root_and_health`: PASSED
-- `test_profile_api`: PASSED
-- `test_campaign_api`: PASSED
-- `test_integrations_status_api`: PASSED
-- `test_approval_gate_blocks_unapproved_draft`: PASSED
-- `test_approval_gate_verifies_valid_hash`: PASSED
-- `test_approval_gate_blocks_modified_content_tampering`: PASSED
-- `test_agent_controller_end_to_end_execution`: PASSED
-- `test_live_workflow_end_to_end`: PASSED
-- `test_agent_planner_creates_structured_plan`: PASSED
-- `test_company_search_tool`: PASSED
-- `test_fetch_website_tool`: PASSED
-- `test_discover_contacts_tool`: PASSED
-- `test_evaluate_relevance_tool`: PASSED
-- `test_generate_email_tool`: PASSED
+### Complete Test Suite Results (24 Passed, 0 Failed):
 
-**Result: 15 / 15 Passed (100% Passing)**
+- `tests/test_api.py::test_root_and_health`: PASSED
+- `tests/test_api.py::test_profile_api`: PASSED
+- `tests/test_api.py::test_campaign_api`: PASSED
+- `tests/test_api.py::test_integrations_status_api`: PASSED
+- `tests/test_approval_gate.py::test_approval_gate_blocks_unapproved_draft`: PASSED
+- `tests/test_approval_gate.py::test_approval_gate_verifies_valid_hash`: PASSED
+- `tests/test_approval_gate.py::test_approval_gate_blocks_modified_content_tampering`: PASSED
+- `tests/test_campaign_flow.py::test_agent_controller_end_to_end_execution`: PASSED
+- `tests/test_live_workflow.py::test_full_user_journey_end_to_end`: PASSED
+- `tests/test_planner.py::test_agent_planner_creates_structured_plan`: PASSED
+- `tests/test_security_hardened.py::test_registration_validation`: PASSED
+- `tests/test_security_hardened.py::test_login_password_verification`: PASSED
+- `tests/test_security_hardened.py::test_token_enforcement_and_validation`: PASSED
+- `tests/test_security_hardened.py::test_cross_user_isolation`: PASSED
+- `tests/test_security_hardened.py::test_gmail_oauth_lifecycle_and_csrf`: PASSED
+- `tests/test_security_hardened.py::test_approval_hash_invalidation_on_edit`: PASSED
+- `tests/test_security_hardened.py::test_concurrent_duplicate_send_atomic_cas`: PASSED
+- `tests/test_security_hardened.py::test_missing_gmail_tokens_in_live_mode`: PASSED
+- `tests/test_security_hardened.py::test_demo_session_disabled_in_production`: PASSED
+- `tests/test_tools.py::test_company_search_tool`: PASSED
+- `tests/test_tools.py::test_fetch_website_tool`: PASSED
+- `tests/test_tools.py::test_discover_contacts_tool`: PASSED
+- `tests/test_tools.py::test_evaluate_relevance_tool`: PASSED
+- `tests/test_tools.py::test_generate_email_tool`: PASSED
 
 ---
 
@@ -222,5 +233,6 @@ LLM_PROVIDER=mock pytest tests/ -v
 - [x] **Personalized Drafts:** Draft generation referencing verified facts without hallucinations.
 - [x] **Human Review & Editor:** Real-time subject and body editing with auto-invalidation safeguards.
 - [x] **Human Approval Gate:** SHA-256 cryptographic authorization.
+- [x] **Atomic Delivery Guard:** Concurrency-safe CAS locking preventing duplicate email sends.
 - [x] **Gmail Dispatch:** Gmail OAuth 2.0 integration with transparent demo delivery simulation fallback.
 - [x] **Execution Observability:** Live SSE event stream, step history, and tool invocation inspector.
